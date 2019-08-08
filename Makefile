@@ -40,7 +40,6 @@ docker_load:
 
 docker_run:
      #cp ~/.gitconfig ./host_gitconfig
-     chmod +x ./entrypoint.sh
      #xhost +
      docker run --network=host --privileged --rm \
           -v /dev:/dev \

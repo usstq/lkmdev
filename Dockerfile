@@ -1,4 +1,4 @@
-FROM ubuntu:16.04
+FROM ubuntu:18.04
 
 # this is a docker image used for compile & debug, only neccessary tools are
 # installed to give user an easy-to-use developing environment.
@@ -22,18 +22,19 @@ RUN \
   apt-get update && \
   apt-get -y upgrade
 
-RUN apt-get install -y autoconf automake bison flex autopoint libtool \
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y autoconf automake bison flex autopoint libtool \
         libglib2.0-dev yasm nasm xutils-dev libpthread-stubs0-dev libpciaccess-dev libudev-dev \
         libfaac-dev libxrandr-dev libegl1-mesa-dev openssh-server git-core wget \
-        build-essential gettext libgles2-mesa-dev vim-nox libav-tools libshout3-dev libsoup2.4-dev \
+        build-essential gettext libgles2-mesa-dev vim-nox libshout3-dev libsoup2.4-dev \
         nginx libssl-dev sudo
 
-RUN apt-get install -y software-properties-common python-software-properties
+RUN apt-get install -y software-properties-common
 RUN apt-get install -y pciutils cpio libtool lsb-release ca-certificates
 
 #================== GDB ================
 RUN apt-get install -y gdb gdb-multiarch libpixman-1-dev libcap-dev libattr1-dev
 
+RUN apt-get install -y python python3
 
 WORKDIR /home
 
