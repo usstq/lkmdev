@@ -28,8 +28,8 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y autoconf automake bison fl
         build-essential gettext libgles2-mesa-dev vim-nox libshout3-dev libsoup2.4-dev \
         nginx libssl-dev sudo
 
-RUN apt-get install -y software-properties-common
-RUN apt-get install -y pciutils cpio libtool lsb-release ca-certificates
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
+RUN DEBIAN_FRONTEND=noninteractive apt-get install -y pciutils cpio libtool lsb-release ca-certificates
 
 #================== GDB ================
 RUN apt-get install -y gdb gdb-multiarch libpixman-1-dev libcap-dev libattr1-dev
@@ -55,3 +55,13 @@ RUN apt-get install -y bc
 
 #================== For modprobe ============================
 RUN apt-get install -y kmod
+
+RUN apt-get install -y build-essential ncurses-dev xz-utils libssl-dev bc flex libelf-dev bison
+
+#===========================================================================================================
+# https://askubuntu.com/questions/281763/is-there-any-prebuilt-qemu-ubuntu-image32bit-online/1081171#1081171
+RUN apt-get install -y cloud-image-utils
+RUN apt-get install -y initramfs-tools-core
+RUN apt-get install -y man-db
+
+RUN apt-get install -y qemu qemu-kvm libvirt-bin  bridge-utils  virt-manager

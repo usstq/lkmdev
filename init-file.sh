@@ -1,61 +1,13 @@
 #!/bin/bash
 
 #init-file.sh
+
+mkdir -p /root/.ssh
+cp -r /root/host.ssh/* /root/.ssh
+chown root /root/.ssh/config
+chmod 600 /root/.ssh/config
+
 echo "========= QEMU based ARM64 kernel module dev env ========="
-
-# RUN kernel on qemu arm64 a53
-function ldd-run-a53(){
-	DEF_CFG="-M virt -m 1024 -smp 1 -cpu cortex-a53 -nographic"
-	if [ $# -ne "2" ]
-    then
-      echo "Run QEMU aarch64 on specified vmlinuz-kernel-image and qcow2-disk-file"
-      echo "    the qcow2-disk-file can be made from rootfs.tar.bz2 file by function qcow2-from-tarbz2"
-      echo "default config is ${DEF_CFG}"
-      echo "Usage: `basename $0` VMLINUXZ DRIVE_FILE"
-      return 112
-    fi
-    VMLINUXZ=$1
-    DRIVE_FILE=$2
-
-    [ -f ${VMLINUXZ} ] || { echo "kernel image ${VMLINUXZ} does not exist"; return 1; }
-    [ -f ${DRIVE_FILE} ] || { echo "qcow2 disk image ${DRIVE_FILE} does not exist"; return 2; }
-
-    echo "DEF_CFG=${DEF_CFG} VMLINUXZ=${VMLINUXZ}, DRIVE_FILE=${DRIVE_FILE}"
-    #return 0
-
-	qemu-system-aarch64  ${DEF_CFG} \
-      -kernel $VMLINUXZ \
-      -append 'root=/dev/vda1 console=ttyAMA0 panic=1 cma=128M' \
-      -drive if=none,file=${DRIVE_FILE},format=qcow2,id=hd0                          `# add a hard drive virtual-disk-file named as hd0` \
-      -netdev user,id=network0 -device e1000,netdev=network0,mac=52:54:00:12:34:56   `# add a network card` \
-      -device virtio-blk-pci,drive=hd0                                               `# add a block device backed by hd0` \
-      -virtfs local,path=${HOME},mount_tag=host0,security_model=passthrough,id=host0 `# add virtfs 9p based device` \
-      -s `# start GDB server on localhost:1234`
-}
-
-# gdb debug kernel running in Qemu
-function ldd-gdb
-{
-	KSRC_DIR=$1
-	[ -d  "${KSRC_DIR}" ] || { echo "kernel source dir ${KSRC_DIR} not provided or incorrect"; return 1;}
-	[ -f ${KSRC_DIR}/vmlinux ] || { echo "kernel executable ${KSRC_DIR}/vmlinux not exist"; return 2; }
-	echo "kernel module debug inside QEMU tips"
-	echo "====== in QEMU: insmod and see where kernel modules are loaded ==== "
-	echo "cat /proc/modules"
-	echo
-	echo "====== in GDB: load symbol file (modify the address as shown by above command) ==== "
-	echo "add-symbol-file $(KSRC_DIR)/drivers/misc/xxx/xxx.ko 0xffff000008bd0000"
-	echo
-	echo "now you can add breakpoint to the kernel modules"
-	echo "$(KSRC_DIR)/vmlinux-gdb.py only generated when executed 'make scripts_gdb'"
-	echo "lx-symbols will load all symbols"
-	gdb-multiarch  \
-					-ex "set debug auto-load on" \
-					-ex "add-auto-load-safe-path ${KSRC_DIR}" \
-					-ex "file ${KSRC_DIR}/vmlinux" \
-					-ex "target remote :1234" \
-					-ex "lx-symbols"
-}
 
 # load kernel module for mount qcow image
 sudo modprobe nbd || sudo insmod /lib/modules/`uname -r`/kernel/drivers/block/nbd.ko || echo "!!!! nbd load failed !!!!"
@@ -176,6 +128,4 @@ alias l='ls -CF'
 alias la='ls -A'
 alias ll='ls -alF'
 alias ls='ls --color=auto'
-
-ldd-help
 

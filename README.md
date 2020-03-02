@@ -14,4 +14,3 @@ Usage:
     * qcow2-from-tarbz2: convert tarbz2 rootfs into qcow2 disk file
     * ldd-run-a53: given a kernel image (vmlinux) and a qcow2-format rootfs, involke QEMU with gdb-server listenning on port 1234
     * ldd-gdb: run gdb-multiarch debugger connecting to port 1234, usually this command is running in another docker bash.
-
