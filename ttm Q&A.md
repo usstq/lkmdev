@@ -185,7 +185,8 @@ second, it has following data:
 
     struct ttm_tt*       ttm: TTM structure holding system pages
     bool             evicted: Whether the object was evicted without user-space knowing.
-    struct dma_fence* moving: Fence set when BO is moving
+    struct dma_fence* moving: Fence set when BO is moving, this fence is setup by ttm_bo_pipeline_move/ttm_bo_move_accel_cleanup
+                              and this fence is also the write fence of the moving dest.
     uint64_t          offset: The current GPU offset
 
 and major supported operations:
@@ -329,6 +330,26 @@ https://youtu.be/HpmzJGHqObs?t=365
 ===========================================================================================
 # KEYFEATURE: Mmap to user-space
 
+# basic execution flow
+
+1.get fake offset
+    user-space:   DRM_IOCTL_MODE_MAP_DUMB
+    kernel-space: drm_mode_mmap_dumb_ioctl() / dev->driver->dumb_map_offset /  drm_gem_dumb_map_offset
+    
+    first the fake offset needs to be created by drm_vma_offset_add, then it was returned to user-space.
+    this operation seems to be done each time drm_mode_mmap_dumb_ioctl() was called but actually it
+    check for duplicate calling and ensure only one fake-offset is allocated for a drm bo.
+
+    note ttm_bo_init_reserved() also calls drm_vma_offset_add.
+
+2.mmap
+    user-space:   mmap from the fake-offset
+    kernel-space: register mmap callback in file_operations, inside mmap, call drm_vma_offset_lock_lookup/drm_vma_offset_exact_lookup_locked/drm_vma_offset_unlock_lookup
+      to find the drm_gem_object by the fake-offset passed in, then setup the pfns into page-table in vma corresponding to that gem object.
+
+The best way to mmap is use pagefault handler, so the pfn only setup when pagefault happens. inside pagefault handler,
+driver can trigger the copy process and wait/retry until the copy has completed, then setup pfn after that.
+    
 # ttm_bo_mmap
 
 vma->vm_pgoff is the fake-offset leads to ttm_buffer_object behind it.
@@ -338,6 +359,270 @@ ttm_bo_vm_ops was installed to vma->vm_ops, among which ttm_bo_vm_fault() is the
 
 this one is meant to insert pfn and thus setup page table for the missing/faulting page
 being accessed by user-process.
+
+there are two different ways to do that depending bo->mem.bus.is_iomem:
+
+1.bo->mem.bus.is_iomem is true: the bo is VRAM backed and currently mapped in IOMEM space
+2.bo->mem.bus.is_iomem is false: the bo is TTM_TT backed and currently populated thus avaliable through ttm->pages
+
+bo driver can decide which path to go in fault_reserve_notify().
+
+for example, amdgpu_fault_reserve_notify only triggers the move by calling ttm_bo_validate() when VRAM is not visible.
+and ttm_bo_validate() will setup bo->mem to the destination place when successfully return, thus the actually vma mapping
+setup code knows to get the pfn from ttm_tt->pages rather than calling io_mem_pfn() callback.
+
+
+===========================================================================================
+# KEYFEATURE on DMABuf/PRIME fd sharing: break the device boundary
+
+sharing buffer with other devices looks like a simple stuff, just passing system pointer between devices.
+actually it's not the correct way, because relying on system pointer means something not absolute necessary:
+ 1. CPU can & need to access it (not necessary)
+ 2. CPU needs to synchronize with HW devices sharing the buffer. (not necessary)
+ 3. CPU/user-space process also needs to manage the life cycle of the buffer since it has pointer.
+
+DMABuf (PRIME fd) is designed for a better/standard/advanced way to implement that w/o relying on system pointer.
+
+libDRM/BO API is enough if no need to cross device boundary, but if we want to cross device boundary, DMABuf/PRIME fd is the only choice.
+
+obviously VRAM based bo cannot be exported/accessed by other devices, it have to be on SYSRAM/visible_VRAM for sharing.
+
+callbacks in struct drm_driver:
+.prime_handle_to_fd = drm_gem_prime_handle_to_fd,
+.prime_fd_to_handle = drm_gem_prime_fd_to_handle,
+.gem_prime_export = amdgpu_gem_prime_export,
+.gem_prime_import = amdgpu_gem_prime_import,
+.gem_prime_get_sg_table = amdgpu_gem_prime_get_sg_table,
+.gem_prime_import_sg_table = amdgpu_gem_prime_import_sg_table,
+.gem_prime_vmap = amdgpu_gem_prime_vmap,
+.gem_prime_vunmap = amdgpu_gem_prime_vunmap,
+.gem_prime_mmap = amdgpu_gem_prime_mmap,
+
+one fact is, once the bo is related to a DMABuf fd, either through export or import, it must be accessible to others (not invisible VRAM)
+and can no longer moves if someone attached to it. in this case the ttm_bo/ttm_tt is "SG" type.
+
+for this type of ttm, 
+
+===========================================================================================
+# KEYFEATURE on DMABuf sharing: export PRIME fd
+under DRM framework, just call drm_gem_prime_handle_to_fd, which is very robust.
+amdgpu overrides some ops to make sure the ttm bo was pinned at correct location when
+sharing_it_with/it_was_attached_by other devices/CPU. this also means, in this case
+we cannot move it around unless we do that with fence holding, especially for write/update
+dmabuf, we can duplicate a copy to VRAM with write fence holded, but we must be sure
+to copy it back before release the fence, otherwise no one can read it.
+
+
+	export_and_register_object
+    	dev->driver->gem_prime_export(obj, flags);
+    	    amdgpu_gem_prime_export               : install following dma_buf_ops 
+               	struct dma_buf_ops amdgpu_dmabuf_ops 
+               		.attach = amdgpu_dma_buf_map_attach,=======================
+	                .detach = amdgpu_dma_buf_map_detach,=======================
+	                
+    	                in addition to drm_gem_map_attach,
+	                    this pair of overrides moves the bo into good place and pin it there.
+	                    
+               		    amdgpu_bo_pin(bo, AMDGPU_GEM_DOMAIN_GTT);// prevent moving
+
+	                .map_dma_buf = drm_gem_map_dma_buf,
+	                .unmap_dma_buf = drm_gem_unmap_dma_buf,
+	                .release = drm_gem_dmabuf_release,
+	                
+	                .begin_cpu_access = amdgpu_dma_buf_begin_cpu_access,=======
+	                    
+	                    in addition to drm_gem_map_attach,
+	                    also moves the bo into good place and pin it there.
+
+	                .mmap = drm_gem_dmabuf_mmap,
+	                .vmap = drm_gem_dmabuf_vmap,
+	                .vunmap = drm_gem_dmabuf_vunmap,
+
+when sharing DMABuf among possible multiple processes/parties, reservation_object/fences are used to sync between them.
+so before you want to write to it, you must aquire execlusive fence, and only release it when you finished writting to
+it, for our case, this means, if you want our HW device to write/update it, we must ensure following sequence:
+
+1.add execlusive fence to the buffer.
+2.move it to VRAM and trigger HW to update it.
+3.return buffer to user-space app, app shares it with other device.
+4.other device will import it on demand of user app.
+4.other device as reader waiting on the fence before access (they don't know the processing is actually doing on a copy in VRAM).
+5.our HW finished the processing and tells the driver by interrupt.
+6.driver copy the data back to the SYSREM identified by sg_table.
+7.signal the fence to allow other device start access.
+
+what if the buffer is not sharing with other device? in that case we don't have to copy it back to SYSRAM.
+
+===========================================================================================
+# KEYFEATURE on DMABuf sharing: import PRIME fd
+
+
+when importing DMABuf fd, we must use ttm_bo_type_sg, so:
+
+* ttm_tt_create() sets TTM_PAGE_FLAG_SG flag before calling bdev->driver->ttm_tt_create()
+* ttm_bo_driver::ttm_tt_create() callback will allocate ttm_dma_tt based tt and init it with ttm_sg_tt_init()
+* ttm_sg_tt_init() calls ttm_sg_tt_alloc_page_directory() which internally allocate dma_address[] array based on bo->num_pages
+  otherwise, it calls ttm_dma_tt_alloc_page_directory which also allocate pages[] array along with dma_address[] array
+  because it will use it when "populate", but for sg based tt, the memory is already allocated and no need to "populate"/"unpopulate"
+* ttm_bo_driver::ttm_tt_populate() callback will not allocate pages for SG type tt, but only create pages to represent them
+
+
+
+
+
+
+drm_driver.prime_fd_to_handle = drm_gem_prime_fd_to_handle
+    dev->driver->gem_prime_import
+        amdgpu_gem_prime_import
+            drm_gem_prime_import
+                drm_gem_prime_import_dev
+                    dma_buf_attach
+                        dmabuf->ops->attach
+                            amdgpu_dma_buf_map_attach
+                                drm_gem_map_attach
+                                amdgpu_bo_reserve
+                                    __ttm_bo_reserve                : Locks a buffer object for validation
+                                        dma_resv_lock(bo->base.resv 
+
+                    dma_buf_map_attachment
+                        dmabuf->ops->map_dma_buf
+                            drm_gem_map_dma_buf
+                                obj->dev->driver->gem_prime_get_sg_table
+                                    amdgpu_gem_prime_get_sg_table()
+                                        drm_prime_pages_to_sg(bo->tbo.ttm->pages, npages)
+                                dma_map_sg_attrs
+
+                    dev->driver->gem_prime_import_sg_table  //
+                        amdgpu_gem_prime_import_sg_table    // Imports shared DMA buffer memory (sg_table) exported by another device
+                            amdgpu_bo_create with AMDGPU_GEM_DOMAIN_CPU/ttm_bo_type_sg/
+                        	bo->tbo.sg = sg;
+                        	bo->tbo.ttm->sg = sg;
+
+===========================================================================================
+# KEYFEATURE on imported BO: user-space access
+
+
+===========================================================================================
+# KEYFEATURE on imported BO: move to VRAM
+
+
+so ttm_bo_type_sg means 
+
+
+
+# API:ttm_bo_device_init
+
+int ttm_bo_device_init(struct ttm_bo_device *bdev,  // return value
+		       struct ttm_bo_driver *driver,        // callback ttm bo driver
+		       struct address_space *mapping,       // drm inode address_space, for evict/swap-out 
+		       bool need_dma32)                     // if system ram backed bo needs DMA32 type
+
+struct ttm_bo_driver is callbacks customize ttm bo driver's behaviour:
+
+static struct ttm_bo_driver amdgpu_bo_driver = {
+	.ttm_tt_create = &amdgpu_ttm_tt_create,             // constructor of ttm_buffer_object, driver can constructe container of ttm bo as derived
+	.ttm_tt_populate = &amdgpu_ttm_tt_populate,         // ttm_tt_populate() rely on this to allocate pages for back the SYSTEM/GTT type BO
+	.ttm_tt_unpopulate = &amdgpu_ttm_tt_unpopulate,     // release pages
+	.invalidate_caches = &amdgpu_invalidate_caches,     // only used when bo is evicted (usually don't need to care)
+	.init_mem_type = &amdgpu_init_mem_type,             // setup ttm_mem_type_manager for TTM_PL_SYSTEM/TTM_PL_TT/TTM_PL_VRAM/ ...
+	                                                       the manager is responsible for non-system-RAM based mem allocation get_node/put_node 
+	                                                       
+	.eviction_valuable = amdgpu_ttm_bo_eviction_valuable, // Check with the driver if it is valuable to evict a BO to make room for a certain placement.
+	.evict_flags = &amdgpu_evict_flags,
+	.move = &amdgpu_bo_move,                            // GPU accellerated move
+	.verify_access = &amdgpu_verify_access,             //  just call drm_vma_node_verify_access
+	.move_notify = &amdgpu_bo_move_notify,
+	.release_notify = &amdgpu_bo_release_notify,
+	.fault_reserve_notify = &amdgpu_bo_fault_reserve_notify,
+	.io_mem_reserve = &amdgpu_ttm_io_mem_reserve,       // only useful if the VRAM-backed BO mem was needed to be accessed by CPU
+	.io_mem_free = &amdgpu_ttm_io_mem_free,
+	.io_mem_pfn = amdgpu_ttm_io_mem_pfn,
+	.access_memory = &amdgpu_ttm_access_memory,         // ???
+	.del_from_lru_notify = &amdgpu_vm_del_from_lru_notify
+};
+
+		int amdgpu_ttm_init(struct amdgpu_device *adev)       
+	/* No others user of address space so set it to 0 */
+	r = ttm_bo_device_init(&adev->mman.bdev,
+			       &amdgpu_bo_driver,
+			       adev->ddev->anon_inode->i_mapping,
+			       dma_addressing_limited(adev->dev));
+	if (r) {
+		DRM_ERROR("failed initializing buffer object driver(%d).\n", r);
+		return r;
+	}
+	adev->mman.initialized = true;
+
+	/* We opt to avoid OOM on system pages allocations */
+	adev->mman.bdev.no_retry = true;
+
+	/* Initialize VRAM pool with all of VRAM divided into pages */
+	r = ttm_bo_init_mm(&adev->mman.bdev, TTM_PL_VRAM, adev->gmc.real_vram_size >> PAGE_SHIFT);
+	if (r) {
+		DRM_ERROR("Failed initializing VRAM heap.\n");
+		return r;
+	}
+
+ttm_mem_io_reserve_vm
+ttm_mem_reg_ioremap
+ttm_bo_kmap
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+int ttm_pool_populate(struct ttm_tt *ttm, struct ttm_operation_ctx *ctx)
+{
+	struct ttm_mem_global *mem_glob = ttm->bdev->glob->mem_glob;
+	unsigned i;
+	int ret;
+
+	if (ttm->state != tt_unpopulated)
+		return 0;
+
+	if (ttm_check_under_lowerlimit(mem_glob, ttm->num_pages, ctx))
+		return -ENOMEM;
+
+	ret = ttm_get_pages(ttm->pages, ttm->num_pages, ttm->page_flags,
+			    ttm->caching_state);
+	if (unlikely(ret != 0)) {
+		ttm_pool_unpopulate_helper(ttm, 0);
+		return ret;
+	}
+
+	for (i = 0; i < ttm->num_pages; ++i) {
+		ret = ttm_mem_global_alloc_page(mem_glob, ttm->pages[i],
+						PAGE_SIZE, ctx);
+		if (unlikely(ret != 0)) {
+			ttm_pool_unpopulate_helper(ttm, i);
+			return -ENOMEM;
+		}
+	}
+
+	if (unlikely(ttm->page_flags & TTM_PAGE_FLAG_SWAPPED)) {
+		ret = ttm_tt_swapin(ttm);
+		if (unlikely(ret != 0)) {
+			ttm_pool_unpopulate(ttm);
+			return ret;
+		}
+	}
+
+	ttm->state = tt_unbound;
+	return 0;
+}
+EXPORT_SYMBOL(ttm_pool_populate);
+
+
+
 
 
 
