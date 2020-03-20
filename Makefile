@@ -7,28 +7,34 @@ IMG_NAME = lkmdev
 default: docker_run
 
 docker_init:
-     mikdir -p docker
-     wget https://download.docker.com/linux/ubuntu/dists/bionic/pool/stable/amd64/containerd.io_1.2.6-3_amd64.deb
-     wget https://download.docker.com/linux/ubuntu/dists/bionic/pool/stable/amd64/docker-ce-cli_19.03.6~3-0~ubuntu-bionic_amd64.deb
-     wget https://download.docker.com/linux/ubuntu/dists/bionic/pool/stable/amd64/docker-ce_19.03.6~3-0~ubuntu-bionic_amd64.deb
-     sudo apt install ./*.deb
-     echo "======== Run once docker-ce has been installed ==========="
-     # proxy
+     if docker -v ; then \
+      echo "======== docker-ce has been installed ==========="; \
+     else \
+      mikdir -p docker; \
+      wget https://download.docker.com/linux/ubuntu/dists/bionic/pool/stable/amd64/containerd.io_1.2.6-3_amd64.deb; \
+      wget https://download.docker.com/linux/ubuntu/dists/bionic/pool/stable/amd64/docker-ce-cli_19.03.6~3-0~ubuntu-bionic_amd64.deb; \
+      wget https://download.docker.com/linux/ubuntu/dists/bionic/pool/stable/amd64/docker-ce_19.03.6~3-0~ubuntu-bionic_amd64.deb; \
+      sudo apt install ./*.deb; \
+     fi
+     @echo "======== Configure http proxy for docker ==========="
      sudo mkdir -p /etc/systemd/system/docker.service.d
-     echo Environment=\"HTTP_PROXY=${HTTP_PROXY}\" >   http-proxy.conf
+     echo "[Service]" >   http-proxy.conf
+     echo Environment=\"HTTP_PROXY=${HTTP_PROXY}\" >>   http-proxy.conf
      echo Environment=\"NO_PROXY=${NO_PROXY}\" >> http-proxy.conf
      sudo mv http-proxy.conf /etc/systemd/system/docker.service.d/
-     # mirror
+     @echo "======== Configure mirror for dockerhub ==========="
      echo {\"registry-mirrors\": [\"https://dockerhub.azk8s.cn\",\"https://reg-mirror.qiniu.com\"]} > daemon.json
      sudo mv daemon.json /etc/docker/
      sudo systemctl daemon-reload
      sudo systemctl restart docker
-     # docker w/o sudo
+     @echo "======== Verify proxy settings ==========="
+     sudo systemctl show --property Environment docker
+     @echo "======== Configure docker without sudo ==========="
      sudo groupadd docker || echo "docker groups is exist"
      sudo gpasswd -a ${USER} docker
-     # test
+     @echo "======== Run hello-world ==========="
      sudo docker run hello-world
-     @echo "======== Done, next login you can do docker without sudo ========="
+     @echo "======== Done ========="
 
 docker_build:
      # --no-cache --pull
@@ -53,6 +59,7 @@ docker_run:
           --env HOME_DIR=${HOME} \
           --env HOST_USER=${USER} \
           -v /lib/modules/$(shell uname -r)/:/lib/modules/$(shell uname -r)/ \
+          -v /usr/src:/usr/src \
           -v ~/.Xauthority:/root/.Xauthority \
           -v /tmp/.X11-unix:/tmp/.X11-unix:ro \
           -e DISPLAY=${DISPLAY} \
@@ -100,7 +107,7 @@ docker_run:
 
 
 
-KSRC?=./_dev/vpusmm_driver/
+KSRC?=./_dev/kernel/
 
 pull:
      mkdir -p ./_dev && \
